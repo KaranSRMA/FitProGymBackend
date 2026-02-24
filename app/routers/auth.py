@@ -16,6 +16,8 @@ router = APIRouter(prefix="/auth", tags=["AUTHENTICATION"])
 
 pwd = CryptContext(schemes=["argon2"], deprecated="auto")
 
+expire_duration = timedelta(hours=15)
+seconds = int(expire_duration.total_seconds())
 
 @manager.user_loader()
 def load_user(id: str):
@@ -64,8 +66,8 @@ def register_user(data: UserCreate, response: Response, db: Session = Depends(ge
     db.refresh(new_user)
 
     access_token = manager.create_access_token(data={"sub": str(
-        new_user.user_id), "role": "member", "is_active": new_user.is_active}, expires=timedelta(hours=15))
-    response.set_cookie(key="access-token", value=access_token, httponly=True,samesite='none', secure=True, path='/')
+        new_user.user_id), "role": "member", "is_active": new_user.is_active}, expires=expire_duration)
+    response.set_cookie(key="access-token", value=access_token, httponly=True,samesite='none', secure=True, path='/',partitioned=True, expires=seconds)
 
     return {"message": "User registered successfully."}
 
@@ -103,8 +105,8 @@ async def login(request: Request, response: Response, db: Session = Depends(get_
             user.last_login = func.now()
             db.commit()
             access_token = manager.create_access_token(data={"sub": str(
-                user.user_id), "role": "member", "is_active": user.is_active}, expires=timedelta(hours=15))
-            response.set_cookie(key="access-token", value=access_token, httponly=True,samesite='none', secure=True, path='/')
+                user.user_id), "role": "member", "is_active": user.is_active}, expires=expire_duration)
+            response.set_cookie(key="access-token", value=access_token, httponly=True,samesite='none', secure=True, path='/',partitioned=True, expires=seconds)
             return {"message": "Login successful", "role": "member", "is_active": user.is_active, "valid": True}
 
         # -------------------------------------------------------------------------------
@@ -120,8 +122,8 @@ async def login(request: Request, response: Response, db: Session = Depends(get_
             trainer.last_login = func.now()
             db.commit()
             access_token = manager.create_access_token(data={"sub": str(
-                trainer.trainer_id), "role": "trainer", "is_active": trainer.is_active}, expires=timedelta(hours=15))
-            response.set_cookie(key="access-token", value=access_token, httponly=True,samesite='none', secure=True, path='/')
+                trainer.trainer_id), "role": "trainer", "is_active": trainer.is_active}, expires=expire_duration)
+            response.set_cookie(key="access-token", value=access_token, httponly=True,samesite='none', secure=True, path='/',partitioned=True, expires=seconds)
             return {"message": "Login successful", "role": "trainer", "is_active": trainer.is_active, "valid": True}
         # -------------------------------------------------------------------------------
 
@@ -136,8 +138,8 @@ async def login(request: Request, response: Response, db: Session = Depends(get_
             admin.last_login = func.now()
             db.commit()
             access_token = manager.create_access_token(data={"sub": str(
-                admin.admin_id), "role": "admin", "is_active": admin.is_active}, expires=timedelta(hours=15))
-            response.set_cookie(key="access-token", value=access_token, httponly=True,samesite='none', secure=True, path='/')
+                admin.admin_id), "role": "admin", "is_active": admin.is_active}, expires=expire_duration)
+            response.set_cookie(key="access-token", value=access_token, httponly=True,samesite='none', secure=True, path='/',partitioned=True, expires=seconds)
             return {"message": "Login successful", "role": "admin", "is_active": admin.is_active, "valid": True}
         # -------------------------------------------------------------------------------
 
