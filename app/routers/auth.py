@@ -65,7 +65,7 @@ def register_user(data: UserCreate, response: Response, db: Session = Depends(ge
 
     access_token = manager.create_access_token(data={"sub": str(
         new_user.user_id), "role": "member", "is_active": new_user.is_active}, expires=timedelta(hours=15))
-    response.set_cookie(key="access-token", value=access_token, httponly=True,samesite='lax', secure=True, path='/')
+    response.set_cookie(key="access-token", value=access_token, httponly=True,samesite='none', secure=True, path='/')
 
     return {"message": "User registered successfully."}
 
@@ -104,7 +104,7 @@ async def login(request: Request, response: Response, db: Session = Depends(get_
             db.commit()
             access_token = manager.create_access_token(data={"sub": str(
                 user.user_id), "role": "member", "is_active": user.is_active}, expires=timedelta(hours=15))
-            response.set_cookie(key="access-token", value=access_token, httponly=True,samesite='lax', secure=True, path='/')
+            response.set_cookie(key="access-token", value=access_token, httponly=True,samesite='none', secure=True, path='/')
             return {"message": "Login successful", "role": "member", "is_active": user.is_active, "valid": True}
 
         # -------------------------------------------------------------------------------
@@ -121,7 +121,7 @@ async def login(request: Request, response: Response, db: Session = Depends(get_
             db.commit()
             access_token = manager.create_access_token(data={"sub": str(
                 trainer.trainer_id), "role": "trainer", "is_active": trainer.is_active}, expires=timedelta(hours=15))
-            response.set_cookie(key="access-token", value=access_token, httponly=True,samesite='lax', secure=True, path='/')
+            response.set_cookie(key="access-token", value=access_token, httponly=True,samesite='none', secure=True, path='/')
             return {"message": "Login successful", "role": "trainer", "is_active": trainer.is_active, "valid": True}
         # -------------------------------------------------------------------------------
 
@@ -137,7 +137,7 @@ async def login(request: Request, response: Response, db: Session = Depends(get_
             db.commit()
             access_token = manager.create_access_token(data={"sub": str(
                 admin.admin_id), "role": "admin", "is_active": admin.is_active}, expires=timedelta(hours=15))
-            response.set_cookie(key="access-token", value=access_token, httponly=True,samesite='lax', secure=True, path='/')
+            response.set_cookie(key="access-token", value=access_token, httponly=True,samesite='none', secure=True, path='/')
             return {"message": "Login successful", "role": "admin", "is_active": admin.is_active, "valid": True}
         # -------------------------------------------------------------------------------
 
