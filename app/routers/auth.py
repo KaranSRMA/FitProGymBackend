@@ -19,6 +19,7 @@ pwd = CryptContext(schemes=["argon2"], deprecated="auto")
 expire_duration = timedelta(hours=15)
 seconds = int(expire_duration.total_seconds())
 
+
 @manager.user_loader()
 def load_user(id: str):
     db = SessionLocal()
@@ -67,7 +68,12 @@ def register_user(data: UserCreate, response: Response, db: Session = Depends(ge
 
     access_token = manager.create_access_token(data={"sub": str(
         new_user.user_id), "role": "member", "is_active": new_user.is_active}, expires=expire_duration)
-    response.set_cookie(key="access-token", value=access_token, httponly=True,samesite='none', secure=True, path='/',partitioned=True, expires=seconds)
+    response.set_cookie(key="access-token", value=access_token, httponly=True,
+                        samesite='none', secure=True, path='/', partitioned=True, expires=seconds)
+
+    cookie_header = response.headers.get("set-cookie")
+    if cookie_header:
+        response.headers["set-cookie"] = f"{cookie_header}; Partitioned"
 
     return {"message": "User registered successfully."}
 
@@ -106,7 +112,11 @@ async def login(request: Request, response: Response, db: Session = Depends(get_
             db.commit()
             access_token = manager.create_access_token(data={"sub": str(
                 user.user_id), "role": "member", "is_active": user.is_active}, expires=expire_duration)
-            response.set_cookie(key="access-token", value=access_token, httponly=True,samesite='none', secure=True, path='/',partitioned=True, expires=seconds)
+            response.set_cookie(key="access-token", value=access_token, httponly=True,
+                                samesite='none', secure=True, path='/', partitioned=True, expires=seconds)
+            cookie_header = response.headers.get("set-cookie")
+            if cookie_header:
+                response.headers["set-cookie"] = f"{cookie_header}; Partitioned"
             return {"message": "Login successful", "role": "member", "is_active": user.is_active, "valid": True}
 
         # -------------------------------------------------------------------------------
@@ -123,7 +133,11 @@ async def login(request: Request, response: Response, db: Session = Depends(get_
             db.commit()
             access_token = manager.create_access_token(data={"sub": str(
                 trainer.trainer_id), "role": "trainer", "is_active": trainer.is_active}, expires=expire_duration)
-            response.set_cookie(key="access-token", value=access_token, httponly=True,samesite='none', secure=True, path='/',partitioned=True, expires=seconds)
+            response.set_cookie(key="access-token", value=access_token, httponly=True,
+                                samesite='none', secure=True, path='/', partitioned=True, expires=seconds)
+            cookie_header = response.headers.get("set-cookie")
+            if cookie_header:
+                response.headers["set-cookie"] = f"{cookie_header}; Partitioned"
             return {"message": "Login successful", "role": "trainer", "is_active": trainer.is_active, "valid": True}
         # -------------------------------------------------------------------------------
 
@@ -139,7 +153,12 @@ async def login(request: Request, response: Response, db: Session = Depends(get_
             db.commit()
             access_token = manager.create_access_token(data={"sub": str(
                 admin.admin_id), "role": "admin", "is_active": admin.is_active}, expires=expire_duration)
-            response.set_cookie(key="access-token", value=access_token, httponly=True,samesite='none', secure=True, path='/',partitioned=True, expires=seconds)
+            response.set_cookie(key="access-token", value=access_token, httponly=True,
+                                samesite='none', secure=True, path='/', partitioned=True, expires=seconds)
+            
+            cookie_header = response.headers.get("set-cookie")
+            if cookie_header:
+                response.headers["set-cookie"] = f"{cookie_header}; Partitioned"
             return {"message": "Login successful", "role": "admin", "is_active": admin.is_active, "valid": True}
         # -------------------------------------------------------------------------------
 
