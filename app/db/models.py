@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, text, DateTime, Text
+from sqlalchemy import Column, Integer, String, Boolean, text, DateTime, Text, ForeignKey
 from .database import Base
 from sqlalchemy.sql import func
 from sqlalchemy.dialects.postgresql import UUID
@@ -16,14 +16,22 @@ class User(Base):
     fitness_goal = Column(String, nullable=False)
     experience_level = Column(String, nullable=False)
     password = Column(String, nullable=False)
+    auth_provider = Column(String, nullable=False, server_default="'password'")
+    google_sub = Column(String, unique=True)
+    password_login_enabled = Column(Boolean, nullable=False, server_default="true")
+    email_verified = Column(Boolean, nullable=False, server_default="true")
+    profile_photo = Column(Text)
     role = Column(String, server_default="'member'")
     is_active = Column(Boolean, server_default="true")
+    token_version = Column(Integer, nullable=False, server_default="0")
     user_id = Column(UUID(as_uuid=True),
                      server_default=text("gen_random_uuid()"))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True),
                         server_default=func.now(), onupdate=func.now())
+    profile_updated_at = Column(DateTime(timezone=True))
     last_login = Column(DateTime(timezone=True), server_default=func.now())
+    password_changes_at = Column(DateTime(timezone=True))
 
 
 class Trainer(Base):
@@ -38,6 +46,7 @@ class Trainer(Base):
     short_bio = Column(String, nullable=False)
     experience_years = Column(Integer, nullable=False)
     is_active = Column(Boolean, server_default="true")
+    token_version = Column(Integer, nullable=False, server_default="0")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True),
                         server_default=func.now(), onupdate=func.now())
@@ -47,6 +56,7 @@ class Trainer(Base):
     role = Column(String, nullable=False, server_default="'trainer'")
     specializations = Column(ARRAY(Text), nullable=False)
     certifications = Column(ARRAY(Text))
+    password_changes_at = Column(DateTime(timezone=True))
 
 
 class Admin(Base):
@@ -58,13 +68,19 @@ class Admin(Base):
     email = Column(String, unique=True, nullable=False)
     password = Column(String, nullable=False)
     phone = Column(String, nullable=False)
+    profile_photo = Column(Text)
     is_active = Column(Boolean,  server_default="true")
+    token_version = Column(Integer, nullable=False, server_default="0")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True),
                         server_default=func.now(), onupdate=func.now())
     last_login = Column(DateTime(timezone=True))
+    password_updated_at = Column(DateTime(timezone=True))
+    profile_updated_at = Column(DateTime(timezone=True))
     is_super_admin = Column(Boolean, server_default="false")
     role = Column(String, server_default="'admin'")
+
+
 
 
 class Plans(Base):
@@ -109,4 +125,42 @@ class Attendance(Base):
     check_out_time = Column(DateTime(timezone=True))
     verified_by_admin = Column(Boolean, server_default="false")
     user_id = Column(UUID(as_uuid=True), nullable=False)
-    token_used = Column(UUID(as_uuid=True), nullable=False)
+    token_used = Column(UUID(as_uuid=True))
+    auto_checkout = Column(Boolean, server_default="true")
+
+
+class TrainerClient(Base):
+    __tablename__ = "trainers_client"
+    id = Column(Integer, primary_key=True)
+    trainer_id = Column(UUID(as_uuid=True), ForeignKey("trainers.trainer_id"))
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"))
+    assign_at = Column(DateTime(timezone=True), server_default=func.now())
+    is_active = Column(Boolean, server_default="true")
+
+class TrainersAttendance(Base):
+    __tablename__ = "trainers_attendances"
+    id = Column(Integer, primary_key=True, index=True)
+    check_in_time = Column(DateTime(timezone=True), server_default=func.now())
+    check_out_time = Column(DateTime(timezone=True))
+    trainer_id = Column(UUID(as_uuid=True), nullable=False)
+    auto_checkout = Column(Boolean, server_default="true")
+
+
+class AdminPasswordResetToken(Base):
+    __tablename__ = "admin_password_reset_tokens"
+    id = Column(Integer, primary_key=True, index=True)
+    admin_id = Column(UUID(as_uuid=True), nullable=False)
+    token_hash = Column(String, nullable=False, unique=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    used = Column(Boolean, server_default="false")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class UserPasswordResetToken(Base):
+    __tablename__ = "user_password_reset_tokens"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(UUID(as_uuid=True), nullable=False)
+    token_hash = Column(String, nullable=False, unique=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    used = Column(Boolean, server_default="false")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

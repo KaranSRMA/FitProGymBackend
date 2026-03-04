@@ -31,6 +31,7 @@ class TrainerOut(BaseModel):
     trainer_id: UUID
     specializations: list[str]
     certifications: list[str]
+    clients_count: int = 0
 
     class Config:
         from_attributes = True
@@ -38,11 +39,13 @@ class TrainerOut(BaseModel):
 
 class TrainerPublicOut(BaseModel):
     id: int
+    trainer_id: UUID
     name: str
     specializations: list[str]
     certifications: list[str]
     short_bio: str
     experience_years: int
+    clients_count: int = 0
 
     class Config:
         from_attributes = True

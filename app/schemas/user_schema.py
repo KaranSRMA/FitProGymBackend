@@ -22,6 +22,7 @@ class UserOut(BaseModel):
     address: str
     fitness_goal: str
     experience_level: str
+    profile_photo: str | None = None
     role: str
     is_active: bool
     created_at: datetime
@@ -40,3 +41,37 @@ class SearchQuery(BaseModel):
 
     class Config:
         extra = "ignore"
+
+
+class MemberProfileOut(BaseModel):
+    user_id: UUID
+    name: str
+    email: EmailStr
+    phone: str
+    address: str
+    fitness_goal: str
+    experience_level: str
+    profile_photo: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class MemberProfileUpdate(BaseModel):
+    name: str = Field(min_length=2, max_length=255)
+    phone: str = Field(min_length=10, max_length=12)
+    address: str = Field(min_length=10, max_length=500)
+    fitness_goal: str = Field(min_length=1, max_length=50)
+    experience_level: str = Field(min_length=1, max_length=50)
+
+
+class MemberVerifyOldPasswordIn(BaseModel):
+    old_password: str = Field(min_length=6, max_length=100)
+
+
+class MemberChangePasswordIn(BaseModel):
+    old_password: str = Field(min_length=6, max_length=100)
+    new_password: str = Field(min_length=6, max_length=100)
+    confirm_password: str = Field(min_length=6, max_length=100)
