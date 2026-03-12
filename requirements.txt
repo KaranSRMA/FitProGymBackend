@@ -9,3 +9,4 @@ fastapi-login==1.10.3
 passlib[argon2]==1.7.4
 python-multipart==0.0.20
 cloudinary==1.44.1
+mailtrap==2.4.0
