@@ -4,7 +4,7 @@ from sqlalchemy import text
 from app.db import models
 from app.db.database import engine
 from app.routers import auth, users, trainers, plans, notifications, checkIn, admins
-from app.config import FRONTEND_URL
+from app.config import FRONTEND_APP_URL
 
 
 models.Base.metadata.create_all(bind=engine)
@@ -22,12 +22,20 @@ with engine.begin() as connection:
     connection.execute(text("ALTER TABLE admins ADD COLUMN IF NOT EXISTS profile_photo TEXT"))
     connection.execute(text("ALTER TABLE admins ADD COLUMN IF NOT EXISTS password_updated_at TIMESTAMPTZ"))
     connection.execute(text("ALTER TABLE admins ADD COLUMN IF NOT EXISTS profile_updated_at TIMESTAMPTZ"))
+    connection.execute(text("ALTER TABLE trainers ADD COLUMN IF NOT EXISTS base_salary INTEGER DEFAULT 0"))
+    connection.execute(text("ALTER TABLE trainers ADD COLUMN IF NOT EXISTS bonus_per_client INTEGER DEFAULT 0"))
+    connection.execute(text("ALTER TABLE trainers ADD COLUMN IF NOT EXISTS compensation_notes TEXT"))
+    connection.execute(text("ALTER TABLE trainers ADD COLUMN IF NOT EXISTS profile_photo TEXT"))
+    connection.execute(text("ALTER TABLE trainers ADD COLUMN IF NOT EXISTS profile_updated_at TIMESTAMPTZ"))
+    connection.execute(text("ALTER TABLE trainers ADD COLUMN IF NOT EXISTS password_updated_at TIMESTAMPTZ"))
+    connection.execute(text("UPDATE trainers SET base_salary = 0 WHERE base_salary IS NULL"))
+    connection.execute(text("UPDATE trainers SET bonus_per_client = 0 WHERE bonus_per_client IS NULL"))
 
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL,"http://localhost:5173"],
+    allow_origins=[FRONTEND_APP_URL,"http://localhost:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

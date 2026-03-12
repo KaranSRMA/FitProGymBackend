@@ -24,6 +24,7 @@ class TrainerOut(BaseModel):
     role: str
     short_bio: str
     experience_years: int
+    profile_photo: str | None = None
     is_active: bool
     created_at: datetime
     updated_at: datetime
@@ -32,6 +33,9 @@ class TrainerOut(BaseModel):
     specializations: list[str]
     certifications: list[str]
     clients_count: int = 0
+    base_salary: int = 0
+    bonus_per_client: int = 0
+    compensation_notes: str | None = None
 
     class Config:
         from_attributes = True
@@ -45,7 +49,47 @@ class TrainerPublicOut(BaseModel):
     certifications: list[str]
     short_bio: str
     experience_years: int
+    profile_photo: str | None = None
     clients_count: int = 0
 
     class Config:
         from_attributes = True
+
+
+class TrainerCompensationUpdate(BaseModel):
+    base_salary: int | None = Field(default=None, ge=0, le=500000)
+    bonus_per_client: int | None = Field(default=None, ge=0, le=100000)
+    compensation_notes: str | None = Field(default=None, max_length=500)
+
+
+class TrainerProfileOut(BaseModel):
+    trainer_id: UUID
+    name: str
+    email: EmailStr
+    phone: str
+    is_active: bool
+    profile_photo: str | None = None
+    password_updated_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+    last_login: datetime | None = None
+
+    class Config:
+        from_attributes = True
+
+
+class TrainerProfileUpdate(BaseModel):
+    name: str = Field(min_length=2, max_length=255)
+    phone: str = Field(min_length=10, max_length=12)
+
+
+class TrainerChangePasswordIn(BaseModel):
+    old_password: str = Field(min_length=6, max_length=100)
+    new_password: str = Field(min_length=6, max_length=100)
+    confirm_password: str = Field(min_length=6, max_length=100)
+
+
+class TrainerResetPasswordConfirmIn(BaseModel):
+    token: str = Field(min_length=20, max_length=500)
+    new_password: str = Field(min_length=6, max_length=100)
+    confirm_password: str = Field(min_length=6, max_length=100)

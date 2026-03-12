@@ -1,17 +1,163 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Request, UploadFile, File
 from sqlalchemy.orm import Session
 from app.db.database import get_db
-from app.db.models import Trainer, Admin, User, TrainerClient, TrainersAttendance
+from app.db.models import Trainer, Admin, User, TrainerClient, TrainersAttendance, TrainerPasswordResetToken
 from app.routers.auth import manager
-from app.schemas.trainer_schema import TrainerOut, TrainerCreate, TrainerPublicOut
+from app.schemas.trainer_schema import (
+    TrainerOut,
+    TrainerCreate,
+    TrainerPublicOut,
+    TrainerCompensationUpdate,
+    TrainerProfileOut,
+    TrainerProfileUpdate,
+    TrainerChangePasswordIn,
+    TrainerResetPasswordConfirmIn,
+)
 from app.schemas.user_schema import SearchQuery
 from sqlalchemy import cast, String, text, func, or_
 import uuid
 from app.routers.auth import pwd
 from datetime import datetime, timezone, timedelta
+import io
+import re
+import secrets
+import hashlib
+import html
+import mailtrap as mt
+from app.config import (
+    CLOUDINARY_CLOUD_NAME,
+    CLOUDINARY_API_KEY,
+    CLOUDINARY_API_SECRET,
+    FRONTEND_APP_URL,
+    MAILTRAP_API_KEY,
+    PASSWORD_RESET_TOKEN_HOURS,
+    TRAINER_PROFILE_CHANGE_COOLDOWN_MINUTES,
+    TRAINER_PASSWORD_CHANGE_COOLDOWN_MINUTES,
+)
+
+try:
+    import cloudinary
+    import cloudinary.uploader
+except ImportError:
+    cloudinary = None
 
 
 router = APIRouter(prefix='/api', tags=["TRAINERS"])
+
+PHONE_REGEX = re.compile(r"^(?:(?:\+91|0)?)[6-9]\d{9}$")
+MAX_PROFILE_PHOTO_BYTES = 5 * 1024 * 1024
+MAILTRAP_INBOX_ID = 4433988
+
+client = mt.MailtrapClient(
+  token=MAILTRAP_API_KEY,
+  sandbox=True,
+  inbox_id=MAILTRAP_INBOX_ID,
+)
+
+if cloudinary and CLOUDINARY_CLOUD_NAME and CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET:
+    cloudinary.config(
+        cloud_name=CLOUDINARY_CLOUD_NAME,
+        api_key=CLOUDINARY_API_KEY,
+        api_secret=CLOUDINARY_API_SECRET,
+        secure=True
+    )
+
+
+def _require_active_trainer(current_user: Trainer):
+    if not current_user or current_user.role != "trainer":
+        raise HTTPException(status_code=403, detail="Trainer role required")
+
+    if not current_user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Account is inactive"
+        )
+
+
+def _normalize_utc_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _enforce_change_cooldown(last_changed_at: datetime | None, cooldown_minutes: int, action: str):
+    if cooldown_minutes <= 0:
+        return
+
+    normalized_last_changed = _normalize_utc_datetime(last_changed_at)
+    if not normalized_last_changed:
+        return
+
+    now_utc = datetime.now(timezone.utc)
+    next_allowed_at = normalized_last_changed + timedelta(minutes=cooldown_minutes)
+    if now_utc < next_allowed_at:
+        remaining_seconds = int((next_allowed_at - now_utc).total_seconds())
+        remaining_minutes = max(1, (remaining_seconds + 59) // 60)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Please wait {remaining_minutes} minute(s) before you can {action} again."
+        )
+
+
+def _ensure_email_config():
+    if not MAILTRAP_API_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="Email is not configured."
+        )
+
+
+def _render_html_body(body: str) -> str:
+    safe_body = html.escape(body or "")
+    safe_body = safe_body.replace("\n", "<br />")
+    return (
+        "<div style=\"font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#111;\">"
+        f"{safe_body}"
+        "</div>"
+    )
+
+
+def _send_email(recipient: str, subject: str, body: str):
+    _ensure_email_config()
+    try:
+        mail = mt.Mail(
+            sender=mt.Address(email="support@fitpro.com", name="Fitpro GYM"),
+            to=[mt.Address(email=recipient)],
+            subject=subject,
+            text=body,
+            html=_render_html_body(body),
+        )
+
+        client.send(mail)
+    except Exception:
+        raise HTTPException(status_code=500, detail=f"Failed to send email")
+
+
+def _issue_trainer_password_reset_token(trainer: Trainer, db: Session):
+    now_utc = datetime.now(timezone.utc)
+    db.query(TrainerPasswordResetToken).filter(
+        TrainerPasswordResetToken.trainer_id == trainer.trainer_id,
+        TrainerPasswordResetToken.used.is_(False)
+    ).update({TrainerPasswordResetToken.used: True}, synchronize_session=False)
+
+    plain_token = secrets.token_urlsafe(48)
+    token_hash = hashlib.sha256(plain_token.encode("utf-8")).hexdigest()
+    expires_at = now_utc + timedelta(hours=PASSWORD_RESET_TOKEN_HOURS)
+
+    token_row = TrainerPasswordResetToken(
+        trainer_id=trainer.trainer_id,
+        token_hash=token_hash,
+        expires_at=expires_at,
+        used=False,
+    )
+    db.add(token_row)
+    db.commit()
+    db.refresh(token_row)
+
+    reset_link = f"{FRONTEND_APP_URL.rstrip('/')}/trainer/reset-password?token={plain_token}"
+    return reset_link, expires_at
 
 
 async def get_optional_user(request: Request):
@@ -240,6 +386,423 @@ def get_member_trainer_history(
     return {"history": history}
 
 
+@router.get("/trainer/summary", status_code=status.HTTP_200_OK)
+def get_trainer_summary(
+    db: Session = Depends(get_db),
+    current_user: Trainer = Depends(manager)
+):
+    if not current_user or current_user.role != "trainer":
+        raise HTTPException(status_code=403, detail="Trainer role required")
+
+    if not current_user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Account is inactive"
+        )
+
+    trainer = db.query(Trainer).filter(
+        Trainer.trainer_id == current_user.trainer_id
+    ).first()
+    if not trainer:
+        raise HTTPException(status_code=404, detail="Trainer not found")
+
+    active_clients_count = db.query(func.count(TrainerClient.id)).filter(
+        TrainerClient.trainer_id == trainer.trainer_id,
+        TrainerClient.is_active.is_(True)
+    ).scalar() or 0
+
+    total_clients_count = db.query(func.count(TrainerClient.id)).filter(
+        TrainerClient.trainer_id == trainer.trainer_id
+    ).scalar() or 0
+
+    today_attendance = db.query(TrainersAttendance).filter(
+        TrainersAttendance.trainer_id == trainer.trainer_id,
+        func.date(TrainersAttendance.check_in_time) == func.current_date()
+    ).order_by(
+        TrainersAttendance.check_in_time.desc()
+    ).first()
+
+    now_utc = datetime.now(timezone.utc)
+    is_checked_in_today = bool(
+        today_attendance and
+        today_attendance.auto_checkout and
+        (
+            today_attendance.check_out_time is None or
+            today_attendance.check_out_time > now_utc
+        )
+    )
+
+    start_7_days = now_utc.date() - timedelta(days=6)
+    checkins_last_7_days = db.query(func.count(TrainersAttendance.id)).filter(
+        TrainersAttendance.trainer_id == trainer.trainer_id,
+        func.date(TrainersAttendance.check_in_time) >= start_7_days
+    ).scalar() or 0
+
+    attendance_trend_rows = db.query(
+        func.date(TrainersAttendance.check_in_time).label("day"),
+        func.count(TrainersAttendance.id).label("count")
+    ).filter(
+        TrainersAttendance.trainer_id == trainer.trainer_id,
+        func.date(TrainersAttendance.check_in_time) >= start_7_days
+    ).group_by(
+        func.date(TrainersAttendance.check_in_time)
+    ).all()
+
+    attendance_trend_map = {row.day: int(row.count) for row in attendance_trend_rows}
+    attendance_trend = []
+    for i in range(7):
+        day = start_7_days + timedelta(days=i)
+        attendance_trend.append({
+            "day": day.strftime("%a"),
+            "date": day.isoformat(),
+            "count": attendance_trend_map.get(day, 0)
+        })
+
+    month_start = datetime(now_utc.year, now_utc.month, 1, tzinfo=timezone.utc)
+    sessions_this_month = db.query(func.count(TrainersAttendance.id)).filter(
+        TrainersAttendance.trainer_id == trainer.trainer_id,
+        TrainersAttendance.check_in_time >= month_start
+    ).scalar() or 0
+
+    avg_session_minutes_value = db.query(
+        func.avg(
+            func.extract(
+                "epoch",
+                TrainersAttendance.check_out_time - TrainersAttendance.check_in_time
+            ) / 60.0
+        )
+    ).filter(
+        TrainersAttendance.trainer_id == trainer.trainer_id,
+        TrainersAttendance.check_out_time.isnot(None),
+        TrainersAttendance.check_out_time >= TrainersAttendance.check_in_time
+    ).scalar()
+
+    avg_session_minutes = round(float(avg_session_minutes_value), 1) if avg_session_minutes_value else 0.0
+
+    return {
+        "trainer": {
+            "trainer_id": str(trainer.trainer_id),
+            "name": trainer.name,
+            "email": trainer.email,
+            "phone": trainer.phone,
+            "specializations": trainer.specializations,
+            "experience_years": trainer.experience_years,
+            "short_bio": trainer.short_bio,
+            "last_login": trainer.last_login,
+            "created_at": trainer.created_at,
+        },
+        "metrics": {
+            "active_clients": int(active_clients_count),
+            "total_clients": int(total_clients_count),
+            "sessions_this_month": int(sessions_this_month),
+            "checkins_last_7_days": int(checkins_last_7_days),
+            "avg_session_minutes": avg_session_minutes,
+        },
+        "attendance": {
+            "has_attendance_today": bool(today_attendance),
+            "is_checked_in_today": is_checked_in_today,
+            "check_in_time": today_attendance.check_in_time if today_attendance else None,
+            "check_out_time": today_attendance.check_out_time if today_attendance else None,
+        },
+        "attendance_trend": attendance_trend,
+        "compensation": {
+            "base_salary": int(trainer.base_salary or 0),
+            "bonus_per_client": int(trainer.bonus_per_client or 0),
+            "compensation_notes": trainer.compensation_notes
+        }
+    }
+
+
+@router.get("/trainer/profile", status_code=status.HTTP_200_OK)
+def get_trainer_profile(
+    db: Session = Depends(get_db),
+    current_user: Trainer = Depends(manager)
+):
+    _require_active_trainer(current_user)
+
+    trainer = db.query(Trainer).filter(Trainer.trainer_id == current_user.trainer_id).first()
+    if not trainer:
+        raise HTTPException(status_code=404, detail="Trainer profile not found")
+
+    return {"profile": TrainerProfileOut.model_validate(trainer)}
+
+
+@router.patch("/trainer/profile", status_code=status.HTTP_200_OK)
+def update_trainer_profile(
+    data: TrainerProfileUpdate,
+    db: Session = Depends(get_db),
+    current_user: Trainer = Depends(manager)
+):
+    _require_active_trainer(current_user)
+
+    normalized_phone = data.phone.strip()
+    if not PHONE_REGEX.fullmatch(normalized_phone):
+        raise HTTPException(status_code=400, detail="Please enter a valid phone number.")
+
+    trainer = db.query(Trainer).filter(Trainer.trainer_id == current_user.trainer_id).first()
+    if not trainer:
+        raise HTTPException(status_code=404, detail="Trainer profile not found")
+
+    _enforce_change_cooldown(
+        trainer.profile_updated_at,
+        TRAINER_PROFILE_CHANGE_COOLDOWN_MINUTES,
+        "update your trainer profile"
+    )
+
+    trainer.name = data.name.strip()
+    trainer.phone = normalized_phone
+    trainer.profile_updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(trainer)
+
+    return {
+        "message": "Trainer profile updated successfully",
+        "profile": TrainerProfileOut.model_validate(trainer)
+    }
+
+
+@router.post("/trainer/change-password", status_code=status.HTTP_200_OK)
+def change_trainer_password(
+    data: TrainerChangePasswordIn,
+    db: Session = Depends(get_db),
+    current_user: Trainer = Depends(manager)
+):
+    _require_active_trainer(current_user)
+
+    if data.new_password != data.confirm_password:
+        raise HTTPException(status_code=400, detail="New password and confirm password do not match")
+
+    trainer = db.query(Trainer).filter(Trainer.trainer_id == current_user.trainer_id).first()
+    if not trainer:
+        raise HTTPException(status_code=404, detail="Trainer profile not found")
+
+    if not pwd.verify(data.old_password, trainer.password):
+        raise HTTPException(status_code=400, detail="Old password is incorrect")
+
+    if pwd.verify(data.new_password, trainer.password):
+        raise HTTPException(status_code=400, detail="New password must be different from old password")
+
+    _enforce_change_cooldown(
+        trainer.password_updated_at,
+        TRAINER_PASSWORD_CHANGE_COOLDOWN_MINUTES,
+        "change your password"
+    )
+
+    trainer.password = pwd.hash(data.new_password)
+    trainer.password_updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(trainer)
+
+    try:
+        _send_email(
+            recipient=trainer.email,
+            subject="FitPro Trainer Password Changed",
+            body=(
+                f"Hello {trainer.name},\n\n"
+                "Your FitPro trainer account password was changed successfully.\n"
+                "If this was not you, contact support immediately.\n\n"
+                f"Time (UTC): {trainer.password_updated_at}\n"
+            )
+        )
+    except Exception:
+        pass
+
+    return {"message": "Password updated successfully"}
+
+
+@router.post("/trainer/profile/photo", status_code=status.HTTP_200_OK)
+def upload_trainer_profile_photo(
+    image: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: Trainer = Depends(manager)
+):
+    _require_active_trainer(current_user)
+
+    if not cloudinary:
+        raise HTTPException(
+            status_code=500,
+            detail="Cloudinary SDK is not installed. Please install backend requirements."
+        )
+
+    if not (CLOUDINARY_CLOUD_NAME and CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET):
+        raise HTTPException(
+            status_code=500,
+            detail="Cloudinary is not fully configured. Please set cloud name, api key and api secret in backend .env"
+        )
+
+    if not image.content_type or not image.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Only image files are allowed")
+
+    image_bytes = image.file.read()
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail="Image file is empty")
+
+    if len(image_bytes) > MAX_PROFILE_PHOTO_BYTES:
+        raise HTTPException(status_code=400, detail="Image size must be 5 MB or smaller")
+
+    trainer = db.query(Trainer).filter(Trainer.trainer_id == current_user.trainer_id).first()
+    if not trainer:
+        raise HTTPException(status_code=404, detail="Trainer profile not found")
+
+    _enforce_change_cooldown(
+        trainer.profile_updated_at,
+        TRAINER_PROFILE_CHANGE_COOLDOWN_MINUTES,
+        "update your trainer profile"
+    )
+
+    try:
+        upload_result = cloudinary.uploader.upload(
+            io.BytesIO(image_bytes),
+            folder="fitprogym/trainers",
+            public_id=f"trainer_{trainer.trainer_id}_profile",
+            overwrite=True,
+            invalidate=True,
+            resource_type="image"
+        )
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Cloudinary upload failed: {error}") from error
+
+    secure_url = upload_result.get("secure_url")
+    if not secure_url:
+        raise HTTPException(status_code=500, detail="Failed to upload image to Cloudinary")
+
+    trainer.profile_photo = secure_url
+    trainer.profile_updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(trainer)
+
+    return {
+        "message": "Trainer profile photo updated successfully",
+        "profile_photo": secure_url,
+        "profile": TrainerProfileOut.model_validate(trainer)
+    }
+
+
+@router.post("/trainer/reset-password/confirm", status_code=status.HTTP_200_OK)
+def confirm_trainer_password_reset(
+    data: TrainerResetPasswordConfirmIn,
+    db: Session = Depends(get_db)
+):
+    if data.new_password != data.confirm_password:
+        raise HTTPException(status_code=400, detail="New password and confirm password do not match")
+
+    now_utc = datetime.now(timezone.utc)
+    token_hash = hashlib.sha256(data.token.encode("utf-8")).hexdigest()
+    token_row = db.query(TrainerPasswordResetToken).filter(
+        TrainerPasswordResetToken.token_hash == token_hash
+    ).first()
+
+    if not token_row:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+
+    if token_row.used:
+        raise HTTPException(status_code=400, detail="Reset token already used")
+
+    if token_row.expires_at < now_utc:
+        token_row.used = True
+        db.commit()
+        raise HTTPException(status_code=400, detail="Reset token expired")
+
+    trainer = db.query(Trainer).filter(Trainer.trainer_id == token_row.trainer_id).first()
+    if not trainer:
+        token_row.used = True
+        db.commit()
+        raise HTTPException(status_code=404, detail="Trainer not found for this token")
+
+    trainer.password = pwd.hash(data.new_password)
+    trainer.password_updated_at = now_utc
+    token_row.used = True
+
+    db.query(TrainerPasswordResetToken).filter(
+        TrainerPasswordResetToken.trainer_id == trainer.trainer_id,
+        TrainerPasswordResetToken.used.is_(False)
+    ).update({TrainerPasswordResetToken.used: True}, synchronize_session=False)
+
+    db.commit()
+    db.refresh(trainer)
+
+    try:
+        _send_email(
+            recipient=trainer.email,
+            subject="FitPro Trainer Password Reset Successful",
+            body=(
+                f"Hello {trainer.name},\n\n"
+                "Your FitPro trainer password has been reset successfully.\n"
+                "If this was not you, contact support immediately.\n\n"
+                f"Time (UTC): {trainer.password_updated_at}\n"
+            )
+        )
+    except Exception:
+        pass
+
+    return {"message": "Password reset successful"}
+
+
+@router.get("/trainer/clients", status_code=status.HTTP_200_OK)
+def get_trainer_clients(
+    db: Session = Depends(get_db),
+    current_user: Trainer = Depends(manager)
+):
+    if not current_user or current_user.role != "trainer":
+        raise HTTPException(status_code=403, detail="Trainer role required")
+
+    if not current_user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Account is inactive"
+        )
+
+    assigned_rows = db.query(TrainerClient, User).join(
+        User, User.user_id == TrainerClient.user_id
+    ).filter(
+        TrainerClient.trainer_id == current_user.trainer_id,
+        TrainerClient.is_active.is_(True)
+    ).order_by(
+        TrainerClient.assign_at.desc()
+    ).all()
+
+    clients = []
+    for assignment, member in assigned_rows:
+        clients.append({
+            "user_id": str(member.user_id),
+            "name": member.name,
+            "email": member.email,
+            "phone": member.phone,
+            "fitness_goal": member.fitness_goal,
+            "experience_level": member.experience_level,
+            "profile_photo": getattr(member, "profile_photo", None),
+            "assigned_at": assignment.assign_at,
+            "is_active": member.is_active,
+        })
+
+    return {
+        "clients": clients,
+        "total_clients": len(clients)
+    }
+
+
+@router.post("/trainer/checkin", status_code=status.HTTP_200_OK)
+def trainer_checkin(
+    db: Session = Depends(get_db),
+    current_user: Trainer = Depends(manager)
+):
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Self check-in is disabled. Please contact an admin for attendance."
+    )
+
+
+@router.post("/trainer/checkout", status_code=status.HTTP_200_OK)
+def trainer_checkout(
+    db: Session = Depends(get_db),
+    current_user: Trainer = Depends(manager)
+):
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Self check-out is disabled. Please contact an admin for attendance."
+    )
+
+
 @router.post("/admin/trainerCheckin/{trainer_id}")
 def admin_checkin_trainer(
     trainer_id: str,
@@ -347,6 +910,105 @@ def admin_checkout_trainer(
     return {
         "message": f"{trainer.name} checked out successfully",
         "check_out_time": active_attendance.check_out_time
+    }
+
+
+@router.post("/admin/trainers/{trainer_id}/force-password-reset", status_code=status.HTTP_200_OK)
+def force_trainer_password_reset(
+    trainer_id: str,
+    db: Session = Depends(get_db),
+    current_user: Admin = Depends(manager)
+):
+    if not current_user or current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required")
+
+    if not current_user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Account is inactive"
+        )
+
+    try:
+        valid_trainer_id = uuid.UUID(trainer_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid trainer ID format")
+
+    trainer = db.query(Trainer).filter(Trainer.trainer_id == valid_trainer_id).first()
+    if not trainer:
+        raise HTTPException(status_code=404, detail="Trainer not found")
+
+    try:
+        reset_link, expires_at = _issue_trainer_password_reset_token(trainer, db)
+        _send_email(
+            recipient=trainer.email,
+            subject="FitPro Trainer Password Reset Link",
+            body=(
+                f"Hello {trainer.name},\n\n"
+                "A password reset was requested for your FitPro trainer account.\n"
+                "Use this secure link to reset your password:\n"
+                f"{reset_link}\n\n"
+                f"This link expires in {PASSWORD_RESET_TOKEN_HOURS} hour(s), at {expires_at} UTC.\n"
+                "If you did not expect this, contact support immediately.\n"
+            )
+        )
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Failed to send reset email: {error}") from error
+
+    return {"message": "Password reset link sent successfully"}
+
+
+@router.patch("/admin/trainers/{trainer_id}/compensation", status_code=status.HTTP_200_OK)
+def update_trainer_compensation(
+    trainer_id: str,
+    data: TrainerCompensationUpdate,
+    db: Session = Depends(get_db),
+    current_user: Admin = Depends(manager)
+):
+    if not current_user or current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required")
+
+    if not current_user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Account is inactive"
+        )
+
+    if data.base_salary is None and data.bonus_per_client is None and data.compensation_notes is None:
+        raise HTTPException(status_code=400, detail="No compensation updates provided")
+
+    try:
+        valid_trainer_id = uuid.UUID(trainer_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid trainer ID format"
+        )
+
+    trainer = db.query(Trainer).filter(Trainer.trainer_id == valid_trainer_id).first()
+    if not trainer:
+        raise HTTPException(status_code=404, detail="Trainer not found")
+
+    if data.base_salary is not None:
+        trainer.base_salary = data.base_salary
+    if data.bonus_per_client is not None:
+        trainer.bonus_per_client = data.bonus_per_client
+    if data.compensation_notes is not None:
+        note = data.compensation_notes.strip()
+        trainer.compensation_notes = note if note else None
+
+    db.commit()
+    db.refresh(trainer)
+
+    return {
+        "message": "Trainer compensation updated successfully",
+        "trainer_id": str(trainer.trainer_id),
+        "compensation": {
+            "base_salary": int(trainer.base_salary or 0),
+            "bonus_per_client": int(trainer.bonus_per_client or 0),
+            "compensation_notes": trainer.compensation_notes
+        }
     }
 
 

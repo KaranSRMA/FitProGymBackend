@@ -1,5 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
 from sqlalchemy.orm import Session
+import mailtrap as mt
+import html
 from app.db.database import get_db
 from app.db.models import User, Admin, Attendance, TrainerClient, Trainer
 from app.routers.auth import manager, pwd
@@ -24,8 +26,7 @@ from app.config import (
     CLOUDINARY_API_KEY,
     CLOUDINARY_API_SECRET,
     MEMBER_PROFILE_CHANGE_COOLDOWN_MINUTES,
-    RESEND_API_KEY,
-    RESEND_FROM_EMAIL,
+    MAILTRAP_API_KEY,
 )
 
 try:
@@ -37,6 +38,13 @@ except ImportError:
 router = APIRouter(prefix='/api', tags=["USERS"])
 PHONE_REGEX = re.compile(r"^(?:(?:\+91|0)?)[6-9]\d{9}$")
 MAX_PROFILE_PHOTO_BYTES = 5 * 1024 * 1024
+MAILTRAP_INBOX_ID = 4433988
+
+client = mt.MailtrapClient(
+  token=MAILTRAP_API_KEY,
+  sandbox=True,
+  inbox_id=MAILTRAP_INBOX_ID,
+)
 
 if cloudinary and CLOUDINARY_CLOUD_NAME and CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET:
     cloudinary.config(
@@ -75,47 +83,38 @@ def _enforce_member_profile_cooldown(member: User):
 
 
 def _ensure_email_config():
-    if not RESEND_API_KEY:
+    if not MAILTRAP_API_KEY:
         raise HTTPException(
             status_code=500,
-            detail="Email is not configured. Set RESEND_API_KEY in backend .env"
+            detail="Email is not configured."
         )
+
+
+def _render_html_body(body: str) -> str:
+    safe_body = html.escape(body or "")
+    safe_body = safe_body.replace("\n", "<br />")
+    return (
+        "<div style=\"font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#111;\">"
+        f"{safe_body}"
+        "</div>"
+    )
 
 
 def _send_email(recipient: str, subject: str, body: str):
     _ensure_email_config()
-    payload = {
-        "from": RESEND_FROM_EMAIL,
-        "to": [recipient],
-        "subject": subject,
-        "text": body,
-    }
-
-    request_data = json.dumps(payload).encode("utf-8")
-    request_obj = urllib_request.Request(
-        url="https://api.resend.com/emails",
-        data=request_data,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {RESEND_API_KEY}",
-            "Content-Type": "application/json",
-        },
-    )
-
     try:
-        with urllib_request.urlopen(request_obj, timeout=20):
-            return
-    except urllib_error.HTTPError as error:
-        error_payload = error.read().decode("utf-8", errors="ignore")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to send email via Resend: {error_payload or f'HTTP {error.code}'}"
-        ) from error
-    except urllib_error.URLError as error:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to send email via Resend: {error.reason}"
-        ) from error
+        mail = mt.Mail(
+        sender=mt.Address(email="support@fitpro.com", name="Fitpro GYM"),
+        to=[mt.Address(email=recipient)],
+        subject=subject,
+        text=body,
+        html=_render_html_body(body),)
+        
+        client.send(mail)
+    except Exception:
+        raise HTTPException(status_code=500, detail=f"Failed to send email")
+
+
 
 
 @router.get("/users", status_code=status.HTTP_200_OK)

@@ -57,6 +57,12 @@ class Trainer(Base):
     specializations = Column(ARRAY(Text), nullable=False)
     certifications = Column(ARRAY(Text))
     password_changes_at = Column(DateTime(timezone=True))
+    password_updated_at = Column(DateTime(timezone=True))
+    profile_photo = Column(Text)
+    profile_updated_at = Column(DateTime(timezone=True))
+    base_salary = Column(Integer, nullable=False, server_default="0")
+    bonus_per_client = Column(Integer, nullable=False, server_default="0")
+    compensation_notes = Column(Text)
 
 
 class Admin(Base):
@@ -103,8 +109,19 @@ class Notifications(Base):
     message = Column(String, nullable=False)
     recipient_id = Column(UUID(as_uuid=True))
     recipient_role = Column(String, nullable=False)
-    is_read = Column(Boolean, server_default="false")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class NotificationStatus(Base):
+    __tablename__ = "notification_status"
+    id = Column(Integer, primary_key=True, index=True)
+    notification_id = Column(Integer, ForeignKey("notifications.id"))
+    recipient_id = Column(UUID(as_uuid=True))
+    recipient_role = Column(String)
+    is_read = Column(Boolean, server_default="false")
+    is_deleted = Column(Boolean, server_default="false")
+
+
 
 
 class QrSessions(Base):
@@ -160,6 +177,16 @@ class UserPasswordResetToken(Base):
     __tablename__ = "user_password_reset_tokens"
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(UUID(as_uuid=True), nullable=False)
+    token_hash = Column(String, nullable=False, unique=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    used = Column(Boolean, server_default="false")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class TrainerPasswordResetToken(Base):
+    __tablename__ = "trainer_password_reset_tokens"
+    id = Column(Integer, primary_key=True, index=True)
+    trainer_id = Column(UUID(as_uuid=True), nullable=False)
     token_hash = Column(String, nullable=False, unique=True)
     expires_at = Column(DateTime(timezone=True), nullable=False)
     used = Column(Boolean, server_default="false")

@@ -1,4 +1,7 @@
+from urllib import request as urllib_request
 import json
+import html
+import mailtrap as mt
 import secrets
 import hashlib
 from datetime import datetime, timedelta, timezone
@@ -17,8 +20,7 @@ from app.config import (
     GOOGLE_OAUTH_CLIENT_SECRET,
     GOOGLE_OAUTH_REDIRECT_URI,
     PASSWORD_RESET_TOKEN_HOURS,
-    RESEND_API_KEY,
-    RESEND_FROM_EMAIL,
+    MAILTRAP_API_KEY,
     SECRET_KEY,
     TOKEN_URL,
 )
@@ -41,6 +43,13 @@ GOOGLE_USERINFO_ENDPOINT = "https://openidconnect.googleapis.com/v1/userinfo"
 GOOGLE_OAUTH_STATE_COOKIE = "google_oauth_state"
 GOOGLE_OAUTH_MODE_COOKIE = "google_oauth_mode"
 VALID_OAUTH_MODES = {"login", "signup"}
+MAILTRAP_INBOX_ID = 4433988
+
+client = mt.MailtrapClient(
+  token=MAILTRAP_API_KEY,
+  sandbox=True,
+  inbox_id=MAILTRAP_INBOX_ID,
+)
 
 
 def _append_partitioned_cookie_flag(response: Response):
@@ -84,7 +93,8 @@ def _oauth_entry_path(mode: str) -> str:
 def _build_frontend_url(path: str, params: dict[str, str] | None = None) -> str:
     base = (FRONTEND_APP_URL or "").rstrip("/")
     if not base:
-        raise HTTPException(status_code=500, detail="FRONTEND_APP_URL is not configured.")
+        raise HTTPException(
+            status_code=500, detail="FRONTEND_APP_URL is not configured.")
 
     normalized_path = path if path.startswith("/") else f"/{path}"
     if not params:
@@ -100,7 +110,8 @@ def _clear_google_oauth_cookies(response: Response):
 
 def _oauth_error_redirect(mode: str, message: str) -> RedirectResponse:
     response = RedirectResponse(
-        url=_build_frontend_url(_oauth_entry_path(mode), {"oauth_error": message}),
+        url=_build_frontend_url(_oauth_entry_path(mode), {
+                                "oauth_error": message}),
         status_code=status.HTTP_302_FOUND,
     )
     _clear_auth_cookie(response)
@@ -109,33 +120,35 @@ def _oauth_error_redirect(mode: str, message: str) -> RedirectResponse:
 
 
 def _ensure_email_config():
-    if not RESEND_API_KEY:
+    if not MAILTRAP_API_KEY:
         raise HTTPException(
             status_code=500,
-            detail="Email is not configured. Set RESEND_API_KEY in backend .env",
+            detail="Email is not configured.",
         )
+
+
+def _render_html_body(body: str) -> str:
+    safe_body = html.escape(body or "")
+    safe_body = safe_body.replace("\n", "<br />")
+    return (
+        "<div style=\"font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#111;\">"
+        f"{safe_body}"
+        "</div>"
+    )
 
 
 def _send_email(recipient: str, subject: str, body: str):
     _ensure_email_config()
-    payload = {
-        "from": RESEND_FROM_EMAIL,
-        "to": [recipient],
-        "subject": subject,
-        "text": body,
-    }
-    request_data = json.dumps(payload).encode("utf-8")
-    request_obj = urllib_request.Request(
-        url="https://api.resend.com/emails",
-        data=request_data,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {RESEND_API_KEY}",
-            "Content-Type": "application/json",
-        },
+    mail = mt.Mail(
+        sender=mt.Address(email="support@fitpro.com", name="Fitpro GYM"),
+        to=[mt.Address(email=recipient)],
+        subject=subject,
+        text=body,
+        html=_render_html_body(body),
     )
-    with urllib_request.urlopen(request_obj, timeout=20):
-        return
+
+    client.send(mail)
+
 
 
 def _notify_member_login(db: Session, member: User, source: str):
@@ -230,7 +243,8 @@ def _exchange_google_code_for_access_token(code: str) -> str:
 
     access_token = token_payload.get("access_token")
     if not access_token:
-        raise HTTPException(status_code=502, detail="Google token exchange failed: Missing access token")
+        raise HTTPException(
+            status_code=502, detail="Google token exchange failed: Missing access token")
     return access_token
 
 
@@ -424,7 +438,8 @@ def google_oauth_callback(
             url=_build_frontend_url("/dashboard"),
             status_code=status.HTTP_302_FOUND,
         )
-        _set_auth_cookie(success_response, str(member.user_id), "member", bool(member.is_active))
+        _set_auth_cookie(success_response, str(member.user_id),
+                         "member", bool(member.is_active))
         _clear_google_oauth_cookies(success_response)
         return success_response
 
@@ -451,7 +466,8 @@ def google_oauth_callback(
         url=_build_frontend_url("/dashboard"),
         status_code=status.HTTP_302_FOUND,
     )
-    _set_auth_cookie(success_response, str(new_member.user_id), "member", bool(new_member.is_active))
+    _set_auth_cookie(success_response, str(new_member.user_id),
+                     "member", bool(new_member.is_active))
     _clear_google_oauth_cookies(success_response)
     return success_response
 
@@ -460,7 +476,8 @@ def google_oauth_callback(
 @router.post("/register", status_code=status.HTTP_201_CREATED)
 def register_user(data: UserCreate, response: Response, db: Session = Depends(get_db)):
     email_normalized = data.email.strip().lower()
-    existing_user = db.query(User).filter(User.email == email_normalized).first()
+    existing_user = db.query(User).filter(
+        User.email == email_normalized).first()
     if existing_user:
         if _normalize_provider(existing_user.auth_provider) == "google" or not bool(existing_user.password_login_enabled):
             raise HTTPException(
@@ -472,7 +489,8 @@ def register_user(data: UserCreate, response: Response, db: Session = Depends(ge
     if db.query(Admin).filter(Admin.email == email_normalized).first() or db.query(Trainer).filter(
         Trainer.email == email_normalized
     ).first():
-        raise HTTPException(status_code=400, detail="This email cannot be used for member registration")
+        raise HTTPException(
+            status_code=400, detail="This email cannot be used for member registration")
 
     new_user = User(
         name=data.name.strip(),
@@ -492,7 +510,8 @@ def register_user(data: UserCreate, response: Response, db: Session = Depends(ge
     db.commit()
     db.refresh(new_user)
 
-    _set_auth_cookie(response, str(new_user.user_id), "member", bool(new_user.is_active))
+    _set_auth_cookie(response, str(new_user.user_id),
+                     "member", bool(new_user.is_active))
     return {"message": "User registered successfully."}
 
 
@@ -513,7 +532,8 @@ async def login(request: Request, response: Response, db: Session = Depends(get_
         admin = db.query(Admin).filter(Admin.email == email).first()
 
         if not user and not trainer and not admin:
-            raise HTTPException(status_code=401, detail="Invalid email or password")
+            raise HTTPException(
+                status_code=401, detail="Invalid email or password")
 
         if user:
             provider = _normalize_provider(user.auth_provider)
@@ -524,40 +544,50 @@ async def login(request: Request, response: Response, db: Session = Depends(get_
                 )
 
             if user.email_verified is False:
-                raise HTTPException(status_code=403, detail="Please verify your email before logging in.")
+                raise HTTPException(
+                    status_code=403, detail="Please verify your email before logging in.")
 
             if not pwd.verify(password, user.password):
-                raise HTTPException(status_code=401, detail="Invalid email or password")
+                raise HTTPException(
+                    status_code=401, detail="Invalid email or password")
 
             if not user.is_active:
-                raise HTTPException(status_code=403, detail="Account is deactiated!")
+                raise HTTPException(
+                    status_code=403, detail="Account is deactiated!")
 
             user.last_login = func.now()
             _notify_member_login(db, user, "Email/Password")
             db.commit()
-            _set_auth_cookie(response, str(user.user_id), "member", bool(user.is_active))
+            _set_auth_cookie(response, str(user.user_id),
+                             "member", bool(user.is_active))
             return {"message": "Login successful", "role": "member", "is_active": user.is_active, "valid": True}
 
         if trainer:
             if not pwd.verify(password, trainer.password):
-                raise HTTPException(status_code=401, detail="Invalid email or password")
+                raise HTTPException(
+                    status_code=401, detail="Invalid email or password")
             if not trainer.is_active:
-                raise HTTPException(status_code=403, detail="Account is deactiated!")
+                raise HTTPException(
+                    status_code=403, detail="Account is deactiated!")
 
             trainer.last_login = func.now()
             db.commit()
-            _set_auth_cookie(response, str(trainer.trainer_id), "trainer", bool(trainer.is_active))
+            _set_auth_cookie(response, str(trainer.trainer_id),
+                             "trainer", bool(trainer.is_active))
             return {"message": "Login successful", "role": "trainer", "is_active": trainer.is_active, "valid": True}
 
         if admin:
             if not pwd.verify(password, admin.password):
-                raise HTTPException(status_code=401, detail="Invalid email or password")
+                raise HTTPException(
+                    status_code=401, detail="Invalid email or password")
             if not admin.is_active:
-                raise HTTPException(status_code=403, detail="Account is deactiated!")
+                raise HTTPException(
+                    status_code=403, detail="Account is deactiated!")
 
             admin.last_login = func.now()
             db.commit()
-            _set_auth_cookie(response, str(admin.admin_id), "admin", bool(admin.is_active))
+            _set_auth_cookie(response, str(admin.admin_id),
+                             "admin", bool(admin.is_active))
             return {
                 "message": "Login successful",
                 "role": "admin",
@@ -566,7 +596,8 @@ async def login(request: Request, response: Response, db: Session = Depends(get_
                 "is_super_admin": bool(admin.is_super_admin),
             }
 
-    raise HTTPException(status_code=400, detail="Email and password are required")
+    raise HTTPException(
+        status_code=400, detail="Email and password are required")
 
 
 @router.post("/forgot-password", status_code=status.HTTP_200_OK)
@@ -578,6 +609,7 @@ async def forgot_password(request: Request, db: Session = Depends(get_db)):
 
     email = str(body.get("email", "")).strip().lower()
     if not email:
+        print("noemail")
         raise HTTPException(status_code=400, detail="Email is required")
 
     member = db.query(User).filter(User.email == email).first()
@@ -606,6 +638,8 @@ async def forgot_password(request: Request, db: Session = Depends(get_db)):
             ),
         )
     except Exception:
+        import traceback
+        traceback.print_exc()
         return generic_response
 
     return generic_response
@@ -625,9 +659,11 @@ async def confirm_password_reset(request: Request, db: Session = Depends(get_db)
     if not token:
         raise HTTPException(status_code=400, detail="Reset token is required")
     if len(new_password) < 6 or len(confirm_password) < 6:
-        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+        raise HTTPException(
+            status_code=400, detail="Password must be at least 6 characters")
     if new_password != confirm_password:
-        raise HTTPException(status_code=400, detail="New password and confirm password do not match")
+        raise HTTPException(
+            status_code=400, detail="New password and confirm password do not match")
 
     now_utc = datetime.now(timezone.utc)
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
@@ -636,7 +672,8 @@ async def confirm_password_reset(request: Request, db: Session = Depends(get_db)
     ).first()
 
     if not token_row:
-        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+        raise HTTPException(
+            status_code=400, detail="Invalid or expired reset token")
     if token_row.used:
         raise HTTPException(status_code=400, detail="Reset token already used")
     if token_row.expires_at < now_utc:
@@ -648,12 +685,14 @@ async def confirm_password_reset(request: Request, db: Session = Depends(get_db)
     if not member:
         token_row.used = True
         db.commit()
-        raise HTTPException(status_code=404, detail="Member not found for this token")
+        raise HTTPException(
+            status_code=404, detail="Member not found for this token")
 
     if _normalize_provider(member.auth_provider) == "google" or not bool(member.password_login_enabled):
         token_row.used = True
         db.commit()
-        raise HTTPException(status_code=400, detail="This account uses Google sign-in")
+        raise HTTPException(
+            status_code=400, detail="This account uses Google sign-in")
 
     member.password = pwd.hash(new_password)
     member.password_changes_at = now_utc
