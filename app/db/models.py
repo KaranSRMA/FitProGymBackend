@@ -41,6 +41,7 @@ class Trainer(Base):
     name = Column(String, nullable=False)
     email = Column(String, unique=True, nullable=False)
     password = Column(String, nullable=False)
+    email_verified = Column(Boolean, nullable=False, server_default="true")
     phone = Column(String, nullable=False)
     address = Column(String, nullable=False)
     short_bio = Column(String, nullable=False)
@@ -185,6 +186,26 @@ class UserPasswordResetToken(Base):
 
 class TrainerPasswordResetToken(Base):
     __tablename__ = "trainer_password_reset_tokens"
+    id = Column(Integer, primary_key=True, index=True)
+    trainer_id = Column(UUID(as_uuid=True), nullable=False)
+    token_hash = Column(String, nullable=False, unique=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    used = Column(Boolean, server_default="false")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class UserEmailVerificationToken(Base):
+    __tablename__ = "user_email_verification_tokens"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(UUID(as_uuid=True), nullable=False)
+    token_hash = Column(String, nullable=False, unique=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    used = Column(Boolean, server_default="false")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class TrainerEmailVerificationToken(Base):
+    __tablename__ = "trainer_email_verification_tokens"
     id = Column(Integer, primary_key=True, index=True)
     trainer_id = Column(UUID(as_uuid=True), nullable=False)
     token_hash = Column(String, nullable=False, unique=True)

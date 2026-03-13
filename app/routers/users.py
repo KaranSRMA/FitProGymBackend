@@ -28,6 +28,7 @@ from app.config import (
     MEMBER_PROFILE_CHANGE_COOLDOWN_MINUTES,
     MAILTRAP_API_KEY,
 )
+from app.email_templates import build_basic_email_html
 
 try:
     import cloudinary
@@ -100,7 +101,7 @@ def _render_html_body(body: str) -> str:
     )
 
 
-def _send_email(recipient: str, subject: str, body: str):
+def _send_email(recipient: str, subject: str, body: str, html_body: str | None = None):
     _ensure_email_config()
     try:
         mail = mt.Mail(
@@ -108,7 +109,7 @@ def _send_email(recipient: str, subject: str, body: str):
         to=[mt.Address(email=recipient)],
         subject=subject,
         text=body,
-        html=_render_html_body(body),)
+        html=html_body or _render_html_body(body),)
         
         client.send(mail)
     except Exception:
@@ -167,6 +168,12 @@ def get_member_profile(
             detail="Forbidden: Account is inactive"
         )
 
+    if getattr(current_user, "email_verified", True) is False:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email not verified. Please verify your email to continue."
+        )
+
     member = db.query(User).filter(User.user_id == current_user.user_id).first()
     if not member:
         raise HTTPException(status_code=404, detail="Member not found")
@@ -187,6 +194,12 @@ def update_member_profile(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Forbidden: Account is inactive"
+        )
+
+    if getattr(current_user, "email_verified", True) is False:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email not verified. Please verify your email to continue."
         )
 
     member = db.query(User).filter(User.user_id == current_user.user_id).first()
@@ -230,6 +243,12 @@ def verify_member_old_password(
             detail="Forbidden: Account is inactive"
         )
 
+    if getattr(current_user, "email_verified", True) is False:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email not verified. Please verify your email to continue."
+        )
+
     member = db.query(User).filter(User.user_id == current_user.user_id).first()
     if not member:
         raise HTTPException(status_code=404, detail="Member not found")
@@ -255,6 +274,12 @@ def change_member_password(
             detail="Forbidden: Account is inactive"
         )
 
+    if getattr(current_user, "email_verified", True) is False:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email not verified. Please verify your email to continue."
+        )
+
     if data.new_password != data.confirm_password:
         raise HTTPException(status_code=400, detail="New password and confirm password do not match")
 
@@ -275,15 +300,22 @@ def change_member_password(
     db.refresh(member)
 
     try:
+        body_lines = [
+            f"Hello {member.name},",
+            "Your FitPro account password was changed successfully.",
+            "If this was not you, contact support immediately.",
+            f"Time (UTC): {member.password_changes_at}",
+        ]
+        html_body = build_basic_email_html(
+            "FitPro Password Changed",
+            "Your FitPro password was changed successfully.",
+            body_lines,
+        )
         _send_email(
             recipient=member.email,
             subject="FitPro Password Changed",
-            body=(
-                f"Hello {member.name},\n\n"
-                "Your FitPro account password was changed successfully.\n"
-                "If this was not you, contact support immediately.\n\n"
-                f"Time (UTC): {member.password_changes_at}\n"
-            )
+            body="\n".join(body_lines),
+            html_body=html_body,
         )
     except Exception:
         # Password is already updated; avoid rolling back credentials on email errors.
@@ -305,6 +337,12 @@ def upload_member_profile_photo(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Forbidden: Account is inactive"
+        )
+
+    if getattr(current_user, "email_verified", True) is False:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email not verified. Please verify your email to continue."
         )
 
     if not cloudinary:
@@ -569,6 +607,12 @@ def get_member_dashboard_insights(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Forbidden: Account is inactive"
+        )
+
+    if getattr(current_user, "email_verified", True) is False:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email not verified. Please verify your email to continue."
         )
 
     today = date.today()

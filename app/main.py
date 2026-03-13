@@ -28,8 +28,10 @@ with engine.begin() as connection:
     connection.execute(text("ALTER TABLE trainers ADD COLUMN IF NOT EXISTS profile_photo TEXT"))
     connection.execute(text("ALTER TABLE trainers ADD COLUMN IF NOT EXISTS profile_updated_at TIMESTAMPTZ"))
     connection.execute(text("ALTER TABLE trainers ADD COLUMN IF NOT EXISTS password_updated_at TIMESTAMPTZ"))
+    connection.execute(text("ALTER TABLE trainers ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT true"))
     connection.execute(text("UPDATE trainers SET base_salary = 0 WHERE base_salary IS NULL"))
     connection.execute(text("UPDATE trainers SET bonus_per_client = 0 WHERE bonus_per_client IS NULL"))
+    connection.execute(text("UPDATE trainers SET email_verified = true WHERE email_verified IS NULL"))
 
 app = FastAPI()
 

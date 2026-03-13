@@ -20,13 +20,23 @@ from app.config import (
     GOOGLE_OAUTH_CLIENT_SECRET,
     GOOGLE_OAUTH_REDIRECT_URI,
     PASSWORD_RESET_TOKEN_HOURS,
+    EMAIL_VERIFICATION_TOKEN_HOURS,
     MAILTRAP_API_KEY,
     SECRET_KEY,
     TOKEN_URL,
 )
 from app.db.database import SessionLocal, get_db
-from app.db.models import Admin, Notifications, Trainer, User, UserPasswordResetToken
+from app.db.models import (
+    Admin,
+    Notifications,
+    Trainer,
+    User,
+    UserPasswordResetToken,
+    UserEmailVerificationToken,
+    TrainerEmailVerificationToken,
+)
 from app.schemas.user_schema import UserCreate
+from app.email_templates import build_action_email_html, build_basic_email_html
 
 
 manager = LoginManager(SECRET_KEY, token_url=TOKEN_URL, use_cookie=True)
@@ -137,14 +147,14 @@ def _render_html_body(body: str) -> str:
     )
 
 
-def _send_email(recipient: str, subject: str, body: str):
+def _send_email(recipient: str, subject: str, body: str, html_body: str | None = None):
     _ensure_email_config()
     mail = mt.Mail(
         sender=mt.Address(email="support@fitpro.com", name="Fitpro GYM"),
         to=[mt.Address(email=recipient)],
         subject=subject,
         text=body,
-        html=_render_html_body(body),
+        html=html_body or _render_html_body(body),
     )
 
     client.send(mail)
@@ -164,14 +174,43 @@ def _notify_member_login(db: Session, member: User, source: str):
         pass
 
     try:
+        body_lines = [
+            f"Hello {member.name},",
+            f"A successful login to your FitPro account just occurred via {source}.",
+            "If this wasn't you, reset your password immediately.",
+        ]
+        html_body = build_basic_email_html(
+            "FitPro Login Alert",
+            "A successful login was detected on your FitPro account.",
+            body_lines,
+        )
         _send_email(
             recipient=member.email,
             subject="FitPro Login Alert",
-            body=(
-                f"Hello {member.name},\n\n"
-                f"A successful login to your FitPro account just occurred via {source}.\n"
-                "If this wasn't you, reset your password immediately.\n"
-            ),
+            body="\n".join(body_lines),
+            html_body=html_body,
+        )
+    except Exception:
+        pass
+
+
+def _notify_trainer_login(db: Session, trainer: Trainer, source: str):
+    try:
+        body_lines = [
+            f"Hello {trainer.name},",
+            f"A successful login to your FitPro trainer account just occurred via {source}.",
+            "If this wasn't you, reset your password immediately.",
+        ]
+        html_body = build_basic_email_html(
+            "FitPro Trainer Login Alert",
+            "A successful trainer login was detected.",
+            body_lines,
+        )
+        _send_email(
+            recipient=trainer.email,
+            subject="FitPro Trainer Login Alert",
+            body="\n".join(body_lines),
+            html_body=html_body,
         )
     except Exception:
         pass
@@ -198,6 +237,80 @@ def _issue_member_password_reset_token(member: User, db: Session):
 
     reset_link = f"{FRONTEND_APP_URL.rstrip('/')}/reset-password?token={plain_token}"
     return reset_link
+
+
+def _issue_member_email_verification_token(member: User, db: Session):
+    now_utc = datetime.now(timezone.utc)
+    db.query(UserEmailVerificationToken).filter(
+        UserEmailVerificationToken.user_id == member.user_id,
+        UserEmailVerificationToken.used.is_(False),
+    ).update({UserEmailVerificationToken.used: True}, synchronize_session=False)
+
+    plain_token = secrets.token_urlsafe(48)
+    token_hash = hashlib.sha256(plain_token.encode("utf-8")).hexdigest()
+    token_row = UserEmailVerificationToken(
+        user_id=member.user_id,
+        token_hash=token_hash,
+        expires_at=now_utc + timedelta(hours=EMAIL_VERIFICATION_TOKEN_HOURS),
+        used=False,
+    )
+    db.add(token_row)
+    db.commit()
+    db.refresh(token_row)
+
+    verify_link = _build_frontend_url(
+        "/verify-email", {"token": plain_token, "role": "member"}
+    )
+    return verify_link, token_row.expires_at
+
+
+def _issue_trainer_email_verification_token(trainer: Trainer, db: Session):
+    now_utc = datetime.now(timezone.utc)
+    db.query(TrainerEmailVerificationToken).filter(
+        TrainerEmailVerificationToken.trainer_id == trainer.trainer_id,
+        TrainerEmailVerificationToken.used.is_(False),
+    ).update({TrainerEmailVerificationToken.used: True}, synchronize_session=False)
+
+    plain_token = secrets.token_urlsafe(48)
+    token_hash = hashlib.sha256(plain_token.encode("utf-8")).hexdigest()
+    token_row = TrainerEmailVerificationToken(
+        trainer_id=trainer.trainer_id,
+        token_hash=token_hash,
+        expires_at=now_utc + timedelta(hours=EMAIL_VERIFICATION_TOKEN_HOURS),
+        used=False,
+    )
+    db.add(token_row)
+    db.commit()
+    db.refresh(token_row)
+
+    verify_link = _build_frontend_url(
+        "/verify-email", {"token": plain_token, "role": "trainer"}
+    )
+    return verify_link, token_row.expires_at
+
+
+def _build_verification_email_content(
+    name: str,
+    account_label: str,
+    verify_link: str,
+    expires_at: datetime,
+):
+    body_lines = [
+        f"Hello {name},",
+        f"Please confirm your email to activate your {account_label}.",
+        f"This link expires in {EMAIL_VERIFICATION_TOKEN_HOURS} hour(s), at {expires_at} UTC.",
+    ]
+    html_body = build_action_email_html(
+        "Confirm your FitPro email",
+        "Verify your FitPro email to activate your account.",
+        body_lines,
+        verify_link,
+        "Verify Email",
+    )
+    text_body = "\n".join(
+        body_lines + [verify_link, "If you did not request this, you can ignore this email."]
+    )
+    return text_body, html_body
 
 
 def _ensure_google_oauth_config():
@@ -503,16 +616,36 @@ def register_user(data: UserCreate, response: Response, db: Session = Depends(ge
         auth_provider="password",
         google_sub=None,
         password_login_enabled=True,
-        email_verified=True,
+        email_verified=False,
     )
 
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
 
-    _set_auth_cookie(response, str(new_user.user_id),
-                     "member", bool(new_user.is_active))
-    return {"message": "User registered successfully."}
+    verification_sent = False
+    try:
+        verify_link, expires_at = _issue_member_email_verification_token(new_user, db)
+        text_body, html_body = _build_verification_email_content(
+            new_user.name,
+            "FitPro account",
+            verify_link,
+            expires_at,
+        )
+        _send_email(
+            recipient=new_user.email,
+            subject="Confirm your FitPro email",
+            body=text_body,
+            html_body=html_body,
+        )
+        verification_sent = True
+    except Exception:
+        verification_sent = False
+
+    return {
+        "message": "Registration successful. Please verify your email to continue.",
+        "verification_sent": verification_sent,
+    }
 
 
 # user login
@@ -545,7 +678,9 @@ async def login(request: Request, response: Response, db: Session = Depends(get_
 
             if user.email_verified is False:
                 raise HTTPException(
-                    status_code=403, detail="Please verify your email before logging in.")
+                    status_code=403,
+                    detail="Email not verified. Please verify your email to continue. You can resend the confirmation link from the login page.",
+                )
 
             if not pwd.verify(password, user.password):
                 raise HTTPException(
@@ -569,8 +704,14 @@ async def login(request: Request, response: Response, db: Session = Depends(get_
             if not trainer.is_active:
                 raise HTTPException(
                     status_code=403, detail="Account is deactiated!")
+            if trainer.email_verified is False:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Email not verified. Please verify your email to continue. You can resend the confirmation link from the login page.",
+                )
 
             trainer.last_login = func.now()
+            _notify_trainer_login(db, trainer, "Email/Password")
             db.commit()
             _set_auth_cookie(response, str(trainer.trainer_id),
                              "trainer", bool(trainer.is_active))
@@ -600,6 +741,156 @@ async def login(request: Request, response: Response, db: Session = Depends(get_
         status_code=400, detail="Email and password are required")
 
 
+@router.get("/verify-email", status_code=status.HTTP_200_OK)
+def verify_email(
+    token: str,
+    role: str = "member",
+    db: Session = Depends(get_db),
+):
+    normalized_role = (role or "member").strip().lower()
+    if normalized_role not in {"member", "trainer"}:
+        raise HTTPException(status_code=400, detail="Invalid role for email verification")
+
+    token_value = (token or "").strip()
+    if not token_value:
+        raise HTTPException(status_code=400, detail="Verification token is required")
+
+    now_utc = datetime.now(timezone.utc)
+    token_hash = hashlib.sha256(token_value.encode("utf-8")).hexdigest()
+
+    if normalized_role == "member":
+        token_row = db.query(UserEmailVerificationToken).filter(
+            UserEmailVerificationToken.token_hash == token_hash
+        ).first()
+        if not token_row:
+            raise HTTPException(status_code=400, detail="Invalid or expired verification token")
+        if token_row.used:
+            raise HTTPException(status_code=400, detail="Verification token already used")
+        if token_row.expires_at < now_utc:
+            token_row.used = True
+            db.commit()
+            raise HTTPException(status_code=400, detail="Verification token expired")
+
+        member = db.query(User).filter(User.user_id == token_row.user_id).first()
+        if not member:
+            token_row.used = True
+            db.commit()
+            raise HTTPException(status_code=404, detail="Member not found for this token")
+
+        if member.email_verified:
+            token_row.used = True
+            db.commit()
+            return {"message": "Email already verified", "verified": True}
+
+        member.email_verified = True
+        token_row.used = True
+        db.query(UserEmailVerificationToken).filter(
+            UserEmailVerificationToken.user_id == member.user_id,
+            UserEmailVerificationToken.used.is_(False),
+        ).update({UserEmailVerificationToken.used: True}, synchronize_session=False)
+        db.commit()
+        return {"message": "Email verified successfully", "verified": True}
+
+    token_row = db.query(TrainerEmailVerificationToken).filter(
+        TrainerEmailVerificationToken.token_hash == token_hash
+    ).first()
+    if not token_row:
+        raise HTTPException(status_code=400, detail="Invalid or expired verification token")
+    if token_row.used:
+        raise HTTPException(status_code=400, detail="Verification token already used")
+    if token_row.expires_at < now_utc:
+        token_row.used = True
+        db.commit()
+        raise HTTPException(status_code=400, detail="Verification token expired")
+
+    trainer = db.query(Trainer).filter(Trainer.trainer_id == token_row.trainer_id).first()
+    if not trainer:
+        token_row.used = True
+        db.commit()
+        raise HTTPException(status_code=404, detail="Trainer not found for this token")
+
+    if trainer.email_verified:
+        token_row.used = True
+        db.commit()
+        return {"message": "Email already verified", "verified": True}
+
+    trainer.email_verified = True
+    token_row.used = True
+    db.query(TrainerEmailVerificationToken).filter(
+        TrainerEmailVerificationToken.trainer_id == trainer.trainer_id,
+        TrainerEmailVerificationToken.used.is_(False),
+    ).update({TrainerEmailVerificationToken.used: True}, synchronize_session=False)
+    db.commit()
+    return {"message": "Email verified successfully", "verified": True}
+
+
+@router.post("/resend-verification", status_code=status.HTTP_200_OK)
+async def resend_verification(request: Request, db: Session = Depends(get_db)):
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid request body")
+
+    email = str(body.get("email", "")).strip().lower()
+    role = str(body.get("role", "")).strip().lower() or None
+
+    if not email:
+        raise HTTPException(status_code=400, detail="Email is required")
+
+    if role and role not in {"member", "trainer"}:
+        raise HTTPException(status_code=400, detail="Invalid role for verification")
+
+    response_message = "If an unverified account exists for this email, a verification link has been sent."
+
+    if role == "member" or role is None:
+        member = db.query(User).filter(User.email == email).first()
+        if member:
+            if member.email_verified:
+                return {"message": "Email already verified. Please log in."}
+            try:
+                verify_link, expires_at = _issue_member_email_verification_token(member, db)
+                text_body, html_body = _build_verification_email_content(
+                    member.name,
+                    "FitPro account",
+                    verify_link,
+                    expires_at,
+                )
+                _send_email(
+                    recipient=member.email,
+                    subject="Confirm your FitPro email",
+                    body=text_body,
+                    html_body=html_body,
+                )
+                return {"message": "Verification email sent. Please check your inbox."}
+            except Exception:
+                return {"message": response_message}
+
+    if role == "trainer" or role is None:
+        trainer = db.query(Trainer).filter(Trainer.email == email).first()
+        if trainer:
+            if trainer.email_verified:
+                return {"message": "Email already verified. Please log in."}
+            try:
+                verify_link, expires_at = _issue_trainer_email_verification_token(trainer, db)
+                text_body, html_body = _build_verification_email_content(
+                    trainer.name,
+                    "FitPro trainer account",
+                    verify_link,
+                    expires_at,
+                )
+                _send_email(
+                    recipient=trainer.email,
+                    subject="Confirm your FitPro trainer email",
+                    body=text_body,
+                    html_body=html_body,
+                )
+                return {"message": "Verification email sent. Please check your inbox."}
+            except Exception:
+                return {"message": response_message}
+
+    return {"message": response_message}
+
+
 @router.post("/forgot-password", status_code=status.HTTP_200_OK)
 async def forgot_password(request: Request, db: Session = Depends(get_db)):
     try:
@@ -625,17 +916,23 @@ async def forgot_password(request: Request, db: Session = Depends(get_db)):
 
     try:
         reset_link = _issue_member_password_reset_token(member, db)
+        body_lines = [
+            f"Hello {member.name},",
+            "A password reset was requested for your FitPro account.",
+            f"This link expires in {PASSWORD_RESET_TOKEN_HOURS} hour(s).",
+        ]
+        html_body = build_action_email_html(
+            "Reset your FitPro password",
+            "Use the secure link to reset your FitPro password.",
+            body_lines,
+            reset_link,
+            "Reset Password",
+        )
         _send_email(
             recipient=member.email,
             subject="FitPro Password Reset Link",
-            body=(
-                f"Hello {member.name},\n\n"
-                "A password reset was requested for your FitPro account.\n"
-                "Use this secure link to reset your password:\n"
-                f"{reset_link}\n\n"
-                f"This link expires in {PASSWORD_RESET_TOKEN_HOURS} hour(s).\n"
-                "If you did not request this, you can ignore this email.\n"
-            ),
+            body="\n".join(body_lines + [reset_link, "If you did not request this, you can ignore this email."]),
+            html_body=html_body,
         )
     except Exception:
         import traceback
@@ -704,14 +1001,21 @@ async def confirm_password_reset(request: Request, db: Session = Depends(get_db)
     db.commit()
 
     try:
+        body_lines = [
+            f"Hello {member.name},",
+            "Your FitPro password has been reset successfully.",
+            "If this was not you, contact support immediately.",
+        ]
+        html_body = build_basic_email_html(
+            "FitPro Password Reset Successful",
+            "Your FitPro password was reset successfully.",
+            body_lines,
+        )
         _send_email(
             recipient=member.email,
             subject="FitPro Password Reset Successful",
-            body=(
-                f"Hello {member.name},\n\n"
-                "Your FitPro password has been reset successfully.\n"
-                "If this was not you, contact support immediately.\n"
-            ),
+            body="\n".join(body_lines),
+            html_body=html_body,
         )
     except Exception:
         pass
@@ -723,6 +1027,16 @@ async def confirm_password_reset(request: Request, db: Session = Depends(get_db)
 async def token(request: Request, response: Response, db: Session = Depends(get_db)):
     user = await manager.optional(request)
     if user:
+        if user.role in {"member", "trainer"} and getattr(user, "email_verified", True) is False:
+            _clear_auth_cookie(response)
+            return {
+                "valid": False,
+                "role": "user",
+                "is_active": False,
+                "user_id": None,
+                "is_super_admin": False,
+                "email_verified": False,
+            }
         user.last_login = func.now()
         db.commit()
         if user.role == "member":

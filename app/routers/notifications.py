@@ -75,6 +75,10 @@ async def websocket_endpoint(
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
+    if user.role in {"member", "trainer"} and getattr(user, "email_verified", True) is False:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
     is_target_valid = False
     try:
         uid = uuid.UUID(recipient_id)
@@ -184,6 +188,12 @@ def get_notifications(
 ):
     if not current_user or not current_user.is_active:
         raise HTTPException(status_code=403, detail="Active account required")
+
+    if current_user.role in {"member", "trainer"} and getattr(current_user, "email_verified", True) is False:
+        raise HTTPException(status_code=403, detail="Email not verified. Please verify your email to continue.")
+
+    if current_user.role in {"member", "trainer"} and getattr(current_user, "email_verified", True) is False:
+        raise HTTPException(status_code=403, detail="Email not verified. Please verify your email to continue.")
 
     skip = (page - 1) * limit
 
@@ -386,6 +396,9 @@ def delete_admin_notifications(request: NotificationRequest, db: Session = Depen
 def delete_user_notification(request: NotificationSoftDelete, db: Session = Depends(get_db), current_user=Depends(manager)):
     if not current_user or not current_user.is_active:
         raise HTTPException(status_code=403, detail="Active account required")
+
+    if current_user.role in {"member", "trainer"} and getattr(current_user, "email_verified", True) is False:
+        raise HTTPException(status_code=403, detail="Email not verified. Please verify your email to continue.")
 
     if current_user.role not in ['member', 'trainer']:
         raise HTTPException(status_code=403, detail="Member or trainer access required")

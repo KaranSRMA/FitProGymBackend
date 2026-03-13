@@ -1,8 +1,16 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request, UploadFile, File
 from sqlalchemy.orm import Session
 from app.db.database import get_db
-from app.db.models import Trainer, Admin, User, TrainerClient, TrainersAttendance, TrainerPasswordResetToken
+from app.db.models import (
+    Trainer,
+    Admin,
+    User,
+    TrainerClient,
+    TrainersAttendance,
+    TrainerPasswordResetToken,
+)
 from app.routers.auth import manager
+from app.routers.auth import _issue_trainer_email_verification_token, _build_verification_email_content
 from app.schemas.trainer_schema import (
     TrainerOut,
     TrainerCreate,
@@ -34,6 +42,7 @@ from app.config import (
     TRAINER_PROFILE_CHANGE_COOLDOWN_MINUTES,
     TRAINER_PASSWORD_CHANGE_COOLDOWN_MINUTES,
 )
+from app.email_templates import build_action_email_html, build_basic_email_html
 
 try:
     import cloudinary
@@ -71,6 +80,12 @@ def _require_active_trainer(current_user: Trainer):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Forbidden: Account is inactive"
+        )
+
+    if getattr(current_user, "email_verified", True) is False:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email not verified. Please verify your email to continue."
         )
 
 
@@ -119,7 +134,7 @@ def _render_html_body(body: str) -> str:
     )
 
 
-def _send_email(recipient: str, subject: str, body: str):
+def _send_email(recipient: str, subject: str, body: str, html_body: str | None = None):
     _ensure_email_config()
     try:
         mail = mt.Mail(
@@ -127,7 +142,7 @@ def _send_email(recipient: str, subject: str, body: str):
             to=[mt.Address(email=recipient)],
             subject=subject,
             text=body,
-            html=_render_html_body(body),
+            html=html_body or _render_html_body(body),
         )
 
         client.send(mail)
@@ -194,14 +209,42 @@ def create_trainers(data: TrainerCreate, db: Session = Depends(get_db), current_
         short_bio=data.short_bio.strip(),
         password=hashed_pass,
         experience_years=data.experience_years,
-        certifications=data.certifications
+        certifications=data.certifications,
+        email_verified=False,
     )
 
     db.add(new_trainer)
     db.commit()
     db.refresh(new_trainer)
 
-    return {"message": "Trainer registered successfully.", "id": new_trainer.id, "trainer_id": new_trainer.trainer_id, "is_active": new_trainer.is_active, "created_at": new_trainer.created_at, "updated_at": new_trainer.updated_at}
+    verification_sent = False
+    try:
+        verify_link, expires_at = _issue_trainer_email_verification_token(new_trainer, db)
+        text_body, html_body = _build_verification_email_content(
+            new_trainer.name,
+            "FitPro trainer account",
+            verify_link,
+            expires_at,
+        )
+        _send_email(
+            recipient=new_trainer.email,
+            subject="Confirm your FitPro trainer email",
+            body=text_body,
+            html_body=html_body,
+        )
+        verification_sent = True
+    except Exception:
+        verification_sent = False
+
+    return {
+        "message": "Trainer registered successfully.",
+        "id": new_trainer.id,
+        "trainer_id": new_trainer.trainer_id,
+        "is_active": new_trainer.is_active,
+        "created_at": new_trainer.created_at,
+        "updated_at": new_trainer.updated_at,
+        "verification_sent": verification_sent,
+    }
 
 
 @router.get("/trainers", status_code=status.HTTP_200_OK)
@@ -307,6 +350,12 @@ def get_member_trainer(
             detail="Forbidden: Account is inactive"
         )
 
+    if getattr(current_user, "email_verified", True) is False:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email not verified. Please verify your email to continue."
+        )
+
     assignment = db.query(TrainerClient).filter(
         TrainerClient.user_id == current_user.user_id,
         TrainerClient.is_active.is_(True)
@@ -355,6 +404,12 @@ def get_member_trainer_history(
             detail="Forbidden: Account is inactive"
         )
 
+    if getattr(current_user, "email_verified", True) is False:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email not verified. Please verify your email to continue."
+        )
+
     assignments = db.query(TrainerClient).filter(
         TrainerClient.user_id == current_user.user_id
     ).order_by(
@@ -398,6 +453,12 @@ def get_trainer_summary(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Forbidden: Account is inactive"
+        )
+
+    if getattr(current_user, "email_verified", True) is False:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email not verified. Please verify your email to continue."
         )
 
     trainer = db.query(Trainer).filter(
@@ -594,15 +655,22 @@ def change_trainer_password(
     db.refresh(trainer)
 
     try:
+        body_lines = [
+            f"Hello {trainer.name},",
+            "Your FitPro trainer account password was changed successfully.",
+            "If this was not you, contact support immediately.",
+            f"Time (UTC): {trainer.password_updated_at}",
+        ]
+        html_body = build_basic_email_html(
+            "FitPro Trainer Password Changed",
+            "Your trainer password was changed successfully.",
+            body_lines,
+        )
         _send_email(
             recipient=trainer.email,
             subject="FitPro Trainer Password Changed",
-            body=(
-                f"Hello {trainer.name},\n\n"
-                "Your FitPro trainer account password was changed successfully.\n"
-                "If this was not you, contact support immediately.\n\n"
-                f"Time (UTC): {trainer.password_updated_at}\n"
-            )
+            body="\n".join(body_lines),
+            html_body=html_body,
         )
     except Exception:
         pass
@@ -722,15 +790,22 @@ def confirm_trainer_password_reset(
     db.refresh(trainer)
 
     try:
+        body_lines = [
+            f"Hello {trainer.name},",
+            "Your FitPro trainer password has been reset successfully.",
+            "If this was not you, contact support immediately.",
+            f"Time (UTC): {trainer.password_updated_at}",
+        ]
+        html_body = build_basic_email_html(
+            "FitPro Trainer Password Reset Successful",
+            "Your trainer password was reset successfully.",
+            body_lines,
+        )
         _send_email(
             recipient=trainer.email,
             subject="FitPro Trainer Password Reset Successful",
-            body=(
-                f"Hello {trainer.name},\n\n"
-                "Your FitPro trainer password has been reset successfully.\n"
-                "If this was not you, contact support immediately.\n\n"
-                f"Time (UTC): {trainer.password_updated_at}\n"
-            )
+            body="\n".join(body_lines),
+            html_body=html_body,
         )
     except Exception:
         pass
@@ -750,6 +825,12 @@ def get_trainer_clients(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Forbidden: Account is inactive"
+        )
+
+    if getattr(current_user, "email_verified", True) is False:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email not verified. Please verify your email to continue."
         )
 
     assigned_rows = db.query(TrainerClient, User).join(
@@ -939,17 +1020,23 @@ def force_trainer_password_reset(
 
     try:
         reset_link, expires_at = _issue_trainer_password_reset_token(trainer, db)
+        body_lines = [
+            f"Hello {trainer.name},",
+            "A password reset was requested for your FitPro trainer account.",
+            f"This link expires in {PASSWORD_RESET_TOKEN_HOURS} hour(s), at {expires_at} UTC.",
+        ]
+        html_body = build_action_email_html(
+            "Reset your FitPro trainer password",
+            "Use the secure link to reset your trainer password.",
+            body_lines,
+            reset_link,
+            "Reset Password",
+        )
         _send_email(
             recipient=trainer.email,
             subject="FitPro Trainer Password Reset Link",
-            body=(
-                f"Hello {trainer.name},\n\n"
-                "A password reset was requested for your FitPro trainer account.\n"
-                "Use this secure link to reset your password:\n"
-                f"{reset_link}\n\n"
-                f"This link expires in {PASSWORD_RESET_TOKEN_HOURS} hour(s), at {expires_at} UTC.\n"
-                "If you did not expect this, contact support immediately.\n"
-            )
+            body="\n".join(body_lines + [reset_link, "If you did not expect this, contact support immediately."]),
+            html_body=html_body,
         )
     except HTTPException:
         raise
@@ -1107,6 +1194,12 @@ def book_personal_trainer(
             detail="Forbidden: Account is inactive"
         )
 
+    if getattr(current_user, "email_verified", True) is False:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email not verified. Please verify your email to continue."
+        )
+
     try:
         valid_trainer_id = uuid.UUID(trainer_id)
     except ValueError:
@@ -1182,6 +1275,12 @@ def change_personal_trainer(
             detail="Forbidden: Account is inactive"
         )
 
+    if getattr(current_user, "email_verified", True) is False:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email not verified. Please verify your email to continue."
+        )
+
     try:
         valid_trainer_id = uuid.UUID(trainer_id)
     except ValueError:
@@ -1240,6 +1339,12 @@ def remove_personal_trainer(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Forbidden: Account is inactive"
+        )
+
+    if getattr(current_user, "email_verified", True) is False:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email not verified. Please verify your email to continue."
         )
 
     active_assignments = db.query(TrainerClient).filter(

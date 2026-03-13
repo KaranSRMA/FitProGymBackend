@@ -82,6 +82,12 @@ def verify_checkin(
         raise HTTPException(
             status_code=403, detail="Unauthorized or inactive user")
 
+    if current_user.role == "member" and getattr(current_user, "email_verified", True) is False:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email not verified. Please verify your email to continue."
+        )
+
     try:
         valid_uuid = uuid.UUID(scanned_token)
     except ValueError:
@@ -142,6 +148,12 @@ def manual_checkin_by_email(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Forbidden: Account is inactive"
+        )
+
+    if getattr(current_user, "email_verified", True) is False:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email not verified. Please verify your email to continue."
         )
 
     member_email = payload.email.strip().lower()
@@ -208,6 +220,12 @@ def get_today_checkins(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Forbidden: Account is inactive"
+        )
+
+    if getattr(current_user, "email_verified", True) is False:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email not verified. Please verify your email to continue."
         )
 
     today_checkins = db.query(Attendance).filter(
