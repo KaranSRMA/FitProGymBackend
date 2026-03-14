@@ -1,5 +1,5 @@
 from sqlalchemy import text, func, or_
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Query
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Query, WebSocket
 from sqlalchemy.orm import Session
 from app.db.database import get_db, SessionLocal
 from app.db.models import Attendance, QrSessions, Admin, User
@@ -8,6 +8,7 @@ from app.routers.auth import manager
 from datetime import date, timedelta, datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import uuid
+import asyncio
 
 
 router = APIRouter(prefix='/api', tags=["CHECKINS"])
@@ -44,6 +45,23 @@ def normalize_timezone(tz: str) -> str:
     return cleaned_tz
 
 
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: str):
+        for connection in self.active_connections:
+            await connection.send_text(message)
+
+ws_manager = ConnectionManager()
+
 @router.post("/generateQrToken", status_code=status.HTTP_201_CREATED)
 def generate_qr_token(background_tasks: BackgroundTasks, db: Session = Depends(get_db), current_user: Admin = Depends(manager)):
     if not current_user or current_user.role != "admin":
@@ -72,7 +90,7 @@ def generate_qr_token(background_tasks: BackgroundTasks, db: Session = Depends(g
 
 
 @router.post("/verifyCheckin/{scanned_token}")
-def verify_checkin(
+async def verify_checkin(
     scanned_token: str,
     db: Session = Depends(get_db),
     current_user=Depends(manager)
@@ -128,6 +146,7 @@ def verify_checkin(
         db.add(new_attendance)
         db.commit()
         db.refresh(new_attendance)
+        asyncio.create_task(ws_manager.broadcast("qr_used"))
         return {"message": f"Welcome, {current_user.name}!"}
     except Exception:
         db.rollback()
@@ -494,3 +513,14 @@ def checkout(db: Session = Depends(get_db), current_user: User = Depends(manager
         raise HTTPException(
             status_code=500, detail="Database error during checkout")
     return {"message": "Checked out successfully", "time":attendance.check_out_time}
+
+
+@router.websocket("/ws/admin-qr")
+async def websocket_admin_qr(websocket: WebSocket):
+    await ws_manager.connect(websocket)
+
+    try:
+        while True:
+            await websocket.receive_text()
+    except:
+        ws_manager.disconnect(websocket)
