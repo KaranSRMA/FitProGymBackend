@@ -448,7 +448,7 @@ def google_oauth_login(mode: str = "login"):
         value=state_token,
         httponly=True,
         secure=True,
-        samesite="lax",
+        samesite="none",
         max_age=600,
         path="/",
     )
@@ -457,7 +457,7 @@ def google_oauth_login(mode: str = "login"):
         value=normalized_mode,
         httponly=True,
         secure=True,
-        samesite="lax",
+        samesite="none",
         max_age=600,
         path="/",
     )
